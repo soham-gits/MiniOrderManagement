@@ -1,57 +1,122 @@
-import mongoose, { Types } from "mongoose";
-import { Product, IProduct } from "../models/Product";
-import { Order, IOrder } from "../models/Order";
+import mongoose from "mongoose";
+import Order, { IOrder } from "../models/Order";
+import Cart, { ICart } from "../models/Cart";
+import Product, { IProduct } from "../models/Product";
+import { queueCancelOrder } from "./cancelOrderQueue";
+import { enqueueEmail } from "./emailQueue";
 
-interface OrderItem {
-  productId: string;
-  qty: number;
-}
+// ---------------------------
+// Helper Types
+// ---------------------------
+type PopulatedCartItem = {
+  product: IProduct;
+  quantity: number;
+};
 
-export const createOrder = async (userName: string, products: OrderItem[]) => {
+type PopulatedCart = ICart & {
+  items: PopulatedCartItem[];
+};
+
+// ---------------------------
+// Checkout Function
+// ---------------------------
+export async function checkout(userId: string): Promise<IOrder> {
   const session = await mongoose.startSession();
-  let createdOrder: IOrder[] = [];
 
-  await session.withTransaction(async () => {
-    const productIds = products.map((p) => new Types.ObjectId(p.productId));
-    const dbProducts = await Product.find({ _id: { $in: productIds } }).session(session).lean<IProduct[]>();
+  try {
+    const createdOrder = await session.withTransaction(async (): Promise<IOrder> => {
+      const cart = (await Cart.findOne({ user: userId })
+        .populate<{ items: PopulatedCartItem[] }>("items.product")
+        .session(session)) as PopulatedCart | null;
 
-    if (dbProducts.length !== productIds.length) throw new Error("One or more products not found");
+      if (!cart || cart.items.length === 0) throw new Error("Cart is empty");
 
-    // Validate stock
-    for (const ordItem of products) {
-      const dbProd = dbProducts.find((p) => (p._id as Types.ObjectId).equals(ordItem.productId));
-      if (!dbProd) throw new Error(`Product ${ordItem.productId} not found`);
-      if (dbProd.stock < ordItem.qty)
-        throw new Error(`Not enough stock for product ${dbProd._id}: available ${dbProd.stock}, required ${ordItem.qty}`);
-    }
+      let total = 0;
+      const orderItems: IOrder["items"] = [];
 
-    // Decrement stock
-    for (const ordItem of products) {
-      const upd = await Product.updateOne(
-        { _id: ordItem.productId, stock: { $gte: ordItem.qty } },
-        { $inc: { stock: -ordItem.qty } }
-      ).session(session);
+      for (const it of cart.items) {
+        const product = it.product;
+        if (!product) throw new Error("Product not found");
 
-      if (upd.matchedCount === 0 || upd.modifiedCount === 0) throw new Error(`Failed to decrement stock for product ${ordItem.productId}`);
-    }
+        if (product.stock - product.reservedStock < it.quantity)
+          throw new Error(`Insufficient stock for ${product.name}`);
 
-    // Calculate total
-    let totalAmount = 0;
-    const productsForOrder = products.map((ordItem) => {
-      const dbProd = dbProducts.find((p) => (p._id as Types.ObjectId).equals(ordItem.productId));
-      if (!dbProd) throw new Error(`Product ${ordItem.productId} not found`);
-      const priceAtPurchase = dbProd.price;
-      totalAmount += priceAtPurchase * ordItem.qty;
-      return { productId: dbProd._id, qty: ordItem.qty, priceAtPurchase };
+        product.reservedStock += it.quantity;
+        await product.save({ session });
+
+        orderItems.push({
+          product: product._id,
+          quantity: it.quantity,
+          priceAtPurchase: product.price,
+        });
+
+        total += product.price * it.quantity;
+      }
+
+      const [orderDoc] = await Order.create(
+        [
+          {
+            user: new mongoose.Types.ObjectId(userId),
+            items: orderItems,
+            totalAmount: total,
+            status: "PENDING_PAYMENT",
+          },
+        ],
+        { session }
+      );
+
+      cart.items = [];
+      await cart.save({ session });
+
+      return orderDoc as IOrder; // <-- cast here
     });
 
-    createdOrder = await Order.create([{ userName, products: productsForOrder, totalAmount }], { session });
-  });
+    if (!createdOrder) throw new Error("Order creation failed");
 
-  session.endSession();
-  return createdOrder[0];
-};
+    // Cast _id as Types.ObjectId
+    const jobId = await queueCancelOrder((createdOrder._id as mongoose.Types.ObjectId).toString());
+    createdOrder.paymentJobId = jobId;
+    await createdOrder.save();
 
-export const listOrders = async () => {
-  return Order.find().populate("products.productId");
-};
+    return createdOrder;
+  } finally {
+    session.endSession();
+  }
+}
+
+// ---------------------------
+// Pay Order Function
+// ---------------------------
+export async function payOrder(orderId: string): Promise<void> {
+  const session = await mongoose.startSession();
+
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findById(orderId)
+        .populate<{ items: { product: IProduct; quantity: number; priceAtPurchase: number }[] }>("items.product")
+        .session(session);
+
+      if (!order) throw new Error("Order not found");
+      if (order.status !== "PENDING_PAYMENT") throw new Error("Order already processed");
+
+      // Update order status
+      order.status = "PAID";
+      await order.save({ session });
+
+      // Decrement stock
+      for (const item of order.items) {
+        const product = item.product;
+        if (!product) throw new Error("Product not found");
+
+        product.stock -= item.quantity;
+        product.reservedStock -= item.quantity;
+        await product.save({ session });
+      }
+
+      // Enqueue confirmation email
+      enqueueEmail(order._id);
+    });
+  } finally {
+    session.endSession();
+  }
+}
