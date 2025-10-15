@@ -1,34 +1,52 @@
-import mongoose, { Schema, Document, Types } from 'mongoose';
+import mongoose, { Schema, Document, Types } from "mongoose";
 
+export type OrderStatus =
+  | "PENDING_PAYMENT"
+  | "PAID"
+  | "SHIPPED"
+  | "DELIVERED"
+  | "CANCELLED";
 
-export interface IOrderProduct {
-    productId: Types.ObjectId;
-    qty: number;
-    priceAtPurchase: number;
+// Define the item interface separately
+export interface IOrderItem {
+  product: Types.ObjectId;
+  quantity: number;
+  priceAtPurchase: number;
 }
 
-
+// Main Order interface
 export interface IOrder extends Document {
-    userName: string;
-    products: IOrderProduct[];
-    totalAmount: number;
-    createdAt: Date;
+  user: Types.ObjectId;
+  items: IOrderItem[];
+  totalAmount: number;
+  status: OrderStatus;
+  createdAt: Date;
+  updatedAt: Date;
+  paymentJobId?: string;
 }
 
+const OrderItemSchema = new Schema<IOrderItem>(
+  {
+    product: { type: Schema.Types.ObjectId, ref: "Product", required: true },
+    quantity: { type: Number, required: true },
+    priceAtPurchase: { type: Number, required: true },
+  },
+  { _id: false }
+);
 
-const OrderProductSchema = new Schema<IOrderProduct>({
-    productId: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
-    qty: { type: Number, required: true, min: 1 },
-    priceAtPurchase: { type: Number, required: true }
-});
-
-
-const OrderSchema = new Schema<IOrder>({
-    userName: { type: String, required: true },
-    products: { type: [OrderProductSchema], required: true },
+const OrderSchema = new Schema<IOrder>(
+  {
+    user: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    items: { type: [OrderItemSchema], required: true },
     totalAmount: { type: Number, required: true },
-    createdAt: { type: Date, default: () => new Date() }
-});
+    status: {
+      type: String,
+      enum: ["PENDING_PAYMENT", "PAID", "SHIPPED", "DELIVERED", "CANCELLED"],
+      default: "PENDING_PAYMENT",
+    },
+    paymentJobId: { type: String },
+  },
+  { timestamps: true }
+);
 
-
-export const Order = mongoose.model<IOrder>('Order', OrderSchema);
+export default mongoose.model<IOrder>("Order", OrderSchema);
