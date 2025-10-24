@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { authenticate } from "../middleware/auth";
+import { authenticate, authorize } from "../middleware/auth";
 import { addItem, getCart, removeItem } from "../controller/cartController";
 import { validateBody } from "../middleware/validate";
 import Joi from "joi";
@@ -11,8 +11,9 @@ const addToCartSchema = Joi.object({
   quantity: Joi.number().integer().min(1).required(),
 });
 
-router.post("/add", authenticate, validateBody(addToCartSchema), addItem);
-router.get("/", authenticate, getCart);
-router.delete("/items/:productId", authenticate, removeItem);
+
+router.post("/add", authenticate, authorize(["USER"]), validateBody(addToCartSchema), addItem);
+router.get("/", authenticate, authorize(["USER"]), getCart);
+router.delete("/items/:productId", authenticate, authorize(["USER"]), removeItem);
 
 export default router;

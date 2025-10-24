@@ -1,13 +1,13 @@
 import { Router } from "express";
-import { authenticate } from "../middleware/auth";
+import { authenticate, authorize } from "../middleware/auth";
 import { checkout as checkoutService } from "../services/orderService";
 import { getOrderById, listUserOrders, payOrder } from "../controller/orderController";
 import { validateQuery, listOrdersQuerySchema } from "../middleware/validate";
 
 const router = Router();
 
-// Checkout
-router.post("/checkout", authenticate, async (req: any, res) => {
+// Checkout (USER only)
+router.post("/checkout", authenticate, authorize(["USER"]), async (req: any, res) => {
   try {
     const order = await checkoutService(req.user._id);
     return res.json(order);
@@ -16,13 +16,13 @@ router.post("/checkout", authenticate, async (req: any, res) => {
   }
 });
 
-// Pay order
-router.post("/:id/pay", authenticate, payOrder);
+// Pay order (USER only)
+router.post("/:id/pay", authenticate, authorize(["USER"]), payOrder);
 
-// List orders with pagination/filter/sort
-router.get("/", authenticate, validateQuery(listOrdersQuerySchema), listUserOrders);
+// List orders (USER only)
+router.get("/", authenticate, authorize(["USER"]), validateQuery(listOrdersQuerySchema), listUserOrders);
 
-// Get single order
-router.get("/:id", authenticate, getOrderById);
+// Get single order (USER only)
+router.get("/:id", authenticate, authorize(["USER"]), getOrderById);
 
 export default router;
